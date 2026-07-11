@@ -12,7 +12,7 @@ class User(Base):
     id = Column(Integer,primary_key=True)
     name = Column(String,nullable=False)
     age = Column(Integer,nullable=False)
-
+    email = Column(String,unique=True)
     def __represent__(self):
         return f"User: {self.id} , name: {self.name}, age: {self.age}"
 
