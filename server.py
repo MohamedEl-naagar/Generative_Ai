@@ -2,33 +2,74 @@ from flask import Flask,jsonify,request
 from db.session import session
 from db.User import User
 from sqlalchemy import or_
+from celery import Celery, Task
 app = Flask(__name__)
 
+
+# task
+
+def celery_init_app(app: Flask) -> Celery:
+    class FlaskTask(Task):
+        def __call__(self, *args: object, **kwargs: object) -> object:
+            with app.app_context():
+                return self.run(*args, **kwargs)
+
+    celery_app = Celery(app.name, task_cls=FlaskTask)
+    celery_app.config_from_object(app.config["CELERY"])
+    celery_app.set_default()
+    app.extensions["celery"] = celery_app
+    return celery_app
+
+app.config.from_mapping(
+    CELERY=dict(
+        broker_url="redis://localhost:6379/0",
+        result_backend="redis://localhost:6379/0",
+        task_ignore_result=False,
+    ),
+)
+celery_app = celery_init_app(app)
 
 # Define the route for the homepage
 @app.route("/")
 def hello_world():
     return jsonify({"message": "hello in our server"})
 
-# List All users
-@app.route("/users")
-def list_users():
-    data = []
+
+@celery_app.task(name="server.list_users_task")
+def list_users_task():
     try:
         users = session.query(User).all()
-        for u in users:
-            data.append({
-            "id": u.id,
-            "name":u.name,
-            "age": u.age,
-            "email":u.email
-        })
-        return jsonify(data)
+        return [
+            {
+                "id": user.id,
+                "name": user.name,
+                "age": user.age,
+                "email": user.email,
+            }
+            for user in users
+        ]
     except Exception as e:
         session.rollback()
-        return {
-            "error": str(e)
-        }, 400
+        raise e
+
+
+@app.route("/users", methods=["GET"])
+def list_users():
+    task = list_users_task.delay()
+    return jsonify({"task_id": task.id, "status": "processing"}), 202
+
+
+@app.route("/users/<task_id>", methods=["GET"])
+def get_users_result(task_id):
+    task = celery_app.AsyncResult(task_id)
+
+    if task.state == "SUCCESS":
+        return jsonify(task.result), 200
+
+    if task.state in {"PENDING", "STARTED", "RETRY"}:
+        return jsonify({"status": task.state}), 202
+
+    return jsonify({"status": task.state, "error": str(task.result)}), 500
 
 # Add user
 @app.route("/user",methods=['POST'])
